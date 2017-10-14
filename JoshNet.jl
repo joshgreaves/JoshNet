@@ -1,3 +1,10 @@
+module JoshNet
+
+export Tensor, None
+export +, *, -, abs, relu, reduce_mean, softmax
+export emptytensor, gaussian_tensor
+export sgd_optimizer
+
 import Base.*
 import Base.+
 import Base.-
@@ -21,7 +28,7 @@ mutable struct Tensor <: JNNode
     parent::JNNode
     train::Bool
 end
-Tensor() = Tensor(Matrix{Float32}(0, 0), Matrix{Float32}(0, 0), None(), true)
+Tensor() = Tensor(Matrix{Float32}(0, 0), Matrix{Float32}(0, 0), None(), false)
 function Tensor(m::Matrix{Float32}; trainable::Bool=true)
     shape = (size(m)[1], size(m)[2])
     return Tensor(m, zeros(Matrix{Float32}(shape)), None(), trainable)
@@ -31,9 +38,6 @@ function emptytensor(cols::Integer, rows::Integer; trainable::Bool=true)
                   zeros{Float32}(cols, rows),
                   None(),
                   trainable)
-end
-function backward(t::Tensor)
-    backward(t.parent)
 end
 function apply_gradients!(t::Tensor)
     if t.train
@@ -56,26 +60,33 @@ end
 struct ReduceMeanOp <: UnaryOp
     parent::JNNode
     child::JNNode
+    dims::Vector{Integer}
 end
 function forward(op::ReduceMeanOp)
     op.child.parent = op
-    op.child.data = Array{Float32}(1, 1)
-    op.child.data[1, 1] = mean(op.parent.data)
-    op.child.grad = zeros(Array{Float32}(1, 1))
+    result = op.parent.data
+    for dim in op.dims
+        result = mean(result, dim)
+    end
+    op.child.data= result
+    op.child.grad = zeros(Array{Float32}(size(result)...))
     return op.child
 end
 function backward(op::ReduceMeanOp)
-    op.parent.grad += (1 / length(op.parent.grad)) .* op.child.grad[1, 1]
+    divisor = 1.0
+    for dim in op.dims
+        divisor *= size(op.parent.data)[dim]
+    end
+    op.parent.grad .+= (op.child.grad ./ divisor)
 end
-
-function reduce_mean(t1::Tensor)
-    r = ReduceMeanOp(t1, Tensor())
+function reduce_mean(t1::Tensor; axis::Vector{<:Integer}=Integer[1, 2])
+    r = ReduceMeanOp(t1, Tensor(), axis)
     return forward(r)
 end
 
 # ==== MATMUL ==== #
 
-mutable struct MatmulOp <: BinaryOp
+struct MatmulOp <: BinaryOp
     parent1::JNNode
     parent2::JNNode
     child::Tensor
@@ -95,10 +106,18 @@ function *(t1::Tensor, t2::Tensor)
     op = MatmulOp(t1, t2, Tensor())
     return forward(op)
 end
+function *(m1::Matrix{Float32}, t2::Tensor)
+    t1 = Tensor(m1, trainable=false)
+    return t1 * t2
+end
+function *(t1::Tensor, m2::Matrix{Float32})
+    t2 = Tensor(m2, trainable=false)
+    return t1 * t2
+end
 
 # ==== ADD ==== #
 
-mutable struct AddOp <: BinaryOp
+struct AddOp <: BinaryOp
     parent1::JNNode
     parent2::JNNode
     child::Tensor
@@ -125,10 +144,18 @@ function +(t1::Tensor, t2::Tensor)
     op = AddOp(t1, t2, Tensor())
     return forward(op)
 end
+function +(m1::Matrix{Float32}, t2::Tensor)
+    t1 = Tensor(m1, trainable=false)
+    return t1 + t2
+end
+function +(t1::Tensor, m2::Matrix{Float32})
+    t2 = Tensor(m2, trainable=false)
+    return t1 + t2
+end
 
 # ==== SUBTRACT ==== #
 
-mutable struct SubtractOp <: BinaryOp
+struct SubtractOp <: BinaryOp
     parent1::JNNode
     parent2::JNNode
     child::Tensor
@@ -155,10 +182,18 @@ function -(t1::Tensor, t2::Tensor)
     op = SubtractOp(t1, t2, Tensor())
     return forward(op)
 end
+function -(m1::Matrix{Float32}, t2::Tensor)
+    t1 = Tensor(m1)
+    return t1 - t2
+end
+function -(t1::Tensor, m2::Matrix{Float32})
+    t2 = Tensor(m2, trainable=false)
+    return t1 - t2
+end
 
 # ==== ABS ==== #
 
-mutable struct AbsOp <: UnaryOp
+struct AbsOp <: UnaryOp
     parent::JNNode
     child::Tensor
 end
@@ -180,7 +215,7 @@ end
 
 # ==== RELU ==== #
 
-mutable struct ReluOp <: UnaryOp
+struct ReluOp <: UnaryOp
     parent::Tensor
     child::Tensor
 end
@@ -195,6 +230,28 @@ function backward(op::ReluOp)
 end
 function relu(t::Tensor)
     op = ReluOp(t, Tensor())
+    return forward(op)
+end
+
+# ==== SOFTMAX ==== #
+
+struct SoftmaxOp <: UnaryOp
+    parent::Tensor
+    child::Tensor
+end
+function forward(op::SoftmaxOp)
+    op.child.parent = op
+    shifted = op.parent.data .- maximum(op.parent.data, 2)
+    exps = exp.(shifted)
+    op.child.data = exps ./ sum(exps, 2)
+    op.child.grad = zeros(Array{Float32}(size(op.child.data)))
+    return op.child
+end
+function backward(op::SoftmaxOp)
+    op.parent.grad = op.child.grad .- (op.child.grad .* sum(op.child.grad, 2))
+end
+function softmax(t::Tensor)
+    op = SoftmaxOp(t, Tensor())
     return forward(op)
 end
 
@@ -233,4 +290,6 @@ function sgd_optimizer(t::Tensor; step_size::Real=0.01)
     fill!(t.grad, step_size)
     sgd_optim_inner(t.parent)
     apply_and_zero_gradients(t.parent)
+end
+
 end
