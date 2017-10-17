@@ -1,14 +1,16 @@
 module JoshNet
 
 export Tensor, None
-export +, *, -, abs, relu, reduce_mean, softmax
-export emptytensor, gaussian_tensor
-export sgd_optimizer
+export +, *, -, abs, relu, reduce_mean, reduce_sum, softmax
+export emptytensor, gaussian_tensor, variance_scaled_tensor
+export sgd_optimizer, fc_layer
 
 import Base.*
 import Base.+
 import Base.-
 import Base.abs
+import Base.exp
+import Base.^
 
 abstract type JNNode end
 abstract type Op <: JNNode end
@@ -50,13 +52,21 @@ end
 
 # ------------------------- INIT ---------------------------------------------
 
-function gaussian_tensor(height::Integer, width::Integer; trainable::Bool=true)
-    return Tensor(convert(Array{Float32, 2}, randn(height, width)), trainable=trainable)
+function gaussian_tensor(height::Integer, width::Integer; mean::Number=0,
+                         variance::Number=0.1, trainable::Bool=true)
+    return Tensor((mean + randn(Float32, height, width)) / variance,
+                  trainable=trainable)
+end
+
+function variance_scaled_tensor(height::Integer, width::Integer; trainable::Bool=true)
+    return Tensor(randn(Float32, height, width) / (10 * height),
+                  trainable=trainable)
 end
 
 # ------------------------- OPS ----------------------------------------------
 
 # ==== REDUCE MEAN ==== #
+
 struct ReduceMeanOp <: UnaryOp
     parent::JNNode
     child::JNNode
@@ -68,7 +78,7 @@ function forward(op::ReduceMeanOp)
     for dim in op.dims
         result = mean(result, dim)
     end
-    op.child.data= result
+    op.child.data = result
     op.child.grad = zeros(Array{Float32}(size(result)...))
     return op.child
 end
@@ -81,6 +91,31 @@ function backward(op::ReduceMeanOp)
 end
 function reduce_mean(t1::Tensor; axis::Vector{<:Integer}=Integer[1, 2])
     r = ReduceMeanOp(t1, Tensor(), axis)
+    return forward(r)
+end
+
+# ==== REDUCE SUM ==== #
+
+struct ReduceSumOp <: UnaryOp
+    parent::JNNode
+    child::JNNode
+    dims::Vector{Integer}
+end
+function forward(op::ReduceSumOp)
+    op.child.parent = op
+    result = op.parent.data
+    for dim in op.dims
+        result = sum(result, dim)
+    end
+    op.child.data = result
+    op.child.grad = zeros(Array{Float32}(size(result)...))
+    return op.child
+end
+function backward(op::ReduceSumOp)
+    op.parent.grad .+= op.child.grad
+end
+function reduce_sum(t1::Tensor; axis::Vector{<:Integer}=Integer[1, 2])
+    r = ReduceSumOp(t1, Tensor(), axis)
     return forward(r)
 end
 
@@ -213,6 +248,47 @@ function abs(t::Tensor)
     return forward(op)
 end
 
+# ==== POWER ==== #
+
+struct PowerOp <: UnaryOp
+    parent::Tensor
+    child::Tensor
+    exponent::Float32
+end
+function forward(op::PowerOp)
+    op.child.parent = op
+    op.child.data = op.parent.data .^ op.exponent
+    op.child.grad = zeros(Array{Float32}(size(op.child.data)))
+    return op.child
+end
+function backward(op::PowerOp)
+    op.parent.grad += (op.exponent .* op.parent.data .^ (op.exponent - 1)) .* op.child.grad
+end
+function ^(t::Tensor, pow::Real)
+    op = PowerOp(t, Tensor(), pow)
+    return forward(op)
+end
+
+# ==== EXP ==== #
+
+struct ExpOp <: UnaryOp
+    parent::Tensor
+    child::Tensor
+end
+function forward(op::ExpOp)
+    op.child.parent = op
+    op.child.data = exp.(op.parent.data)
+    op.child.grad = zeros(Array{Float32}(size(op.child.data)))
+    return op.child
+end
+function backward(op::ExpOp)
+    op.parent.grad = op.child.grad .* exp.(op.parent.data)
+end
+function exp(t::Tensor)
+    op = ExpOp(t, Tensor())
+    return forward(op)
+end
+
 # ==== RELU ==== #
 
 struct ReluOp <: UnaryOp
@@ -235,6 +311,9 @@ end
 
 # ==== SOFTMAX ==== #
 
+# function sotfmax(t::Tensor)
+#     exps = exp()
+# end
 struct SoftmaxOp <: UnaryOp
     parent::Tensor
     child::Tensor
@@ -248,7 +327,22 @@ function forward(op::SoftmaxOp)
     return op.child
 end
 function backward(op::SoftmaxOp)
-    op.parent.grad = op.child.grad .- (op.child.grad .* sum(op.child.grad, 2))
+    dims = size(op.child.data)
+    jacobian = Matrix{Float32}(dims[2], dims[2])
+    for i in 1:dims[1]
+        # Calculate the jacobian for row i
+        jacobian[:, :] = .-(op.child.data[i, :] * transpose(op.child.data[i, :]))
+        jacobian[:, :] .*= (1 .- eye(dims[2]))
+        jacobian[:, :] .+= Diagonal(op.child.data[i, :] .* (1 .- op.child.data[i, :]))
+        jacobian[:, :] .*= op.child.grad[i, :]
+
+        # # Apply the jacobian
+        op.parent.grad[i:i, :] .+= sum(jacobian[:, :], 1)
+    end
+    return jacobian
+    # same = op.child.data .* (1 .- op.child.data)
+    # diff = sum(.-(op.child.data ), 2)
+    # op.parent.grad = op.child.grad .- (op.child.grad .* sum(op.child.grad, 2))
 end
 function softmax(t::Tensor)
     op = SoftmaxOp(t, Tensor())
@@ -290,6 +384,17 @@ function sgd_optimizer(t::Tensor; step_size::Real=0.01)
     fill!(t.grad, step_size)
     sgd_optim_inner(t.parent)
     apply_and_zero_gradients(t.parent)
+end
+
+# -----------------------------HELPERS--------------------------------------- #
+
+function fc_layer(num_inputs::Integer, num_outputs::Integer;
+                  init_fn::Function=variance_scaled_tensor,
+                  activation_fn::Function=relu)
+    W = init_fn(num_inputs, num_outputs)
+    b = init_fn(1, num_outputs)
+    f(t::Union{Tensor, Matrix{Float32}}) = activation_fn((t * W) + b)
+    return f, (W, b)
 end
 
 end

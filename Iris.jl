@@ -1,4 +1,6 @@
-push!(LOAD_PATH, ".")
+include("./JoshNet.jl")
+include("./DataPrep.jl")
+include("./Arff.jl")
 
 importall JoshNet
 import DataPrep
@@ -20,34 +22,48 @@ for i in 1:num_data
     labels[i, :] = mappings[arff.data[i, end]]
 end
 
-# Define the weights
-W1 = gaussian_tensor(4, 20)
-b1 = gaussian_tensor(1, 20)
-
-W2 = gaussian_tensor(20, 20)
-b2 = gaussian_tensor(1, 20)
-
-W3 = gaussian_tensor(20, num_classes)
-b3 = gaussian_tensor(1, num_classes)
+# Define the layers
+fc1, Wb1 = fc_layer(4, 100)
+fc2, Wb2 = fc_layer(100, 100)
+fc3, Wb3 = fc_layer(100, num_classes, activation_fn=softmax)
 
 # Define hyperparameters
-learning_rate = 0.00001
-num_epochs = 100
-batch_size = 10
+learning_rate = 0.1
+num_epochs = 1000
+batch_size = 32
+
+# The network definition
+function classify(input::Matrix{Float32})
+    h1 = fc1(input)
+    h2 = fc2(h1)
+    return fc3(h2)
+end
+
+# Calculate overall accuracy
+function evaluate()
+    predictions = classify(data)
+    p_maxvals, p_maxindices = findmax(predictions.data, 2)
+    t_maxvals, t_maxindices = findmax(labels, 2)
+    correct = sum(p_maxindices .== t_maxindices)
+    incorrect = num_data - correct
+    println("Accuracy: ", correct, "/", num_data, " = ", correct/num_data)
+    println("Error: ", incorrect, "/", num_data, " = ", incorrect/num_data)
+end
+evaluate()
 
 # Train
 for i in 1:1000
     # Get a batch
     batch_x, batch_y = DataPrep.getbatch(data, labels, batch_size=batch_size)
 
-    h1 = relu((batch_x * W1) + b1)
-    # h2 = relu((h1 * W2) + b2)
-    o = softmax((h1 * W3) + b3)
-    loss = reduce_mean(abs(o - batch_y))
-    if i % 1 == 0
+    o = classify(batch_x)
+    loss = reduce_mean(reduce_sum((o - batch_y)^2.0, axis=[2]))
+
+    if i % 20 == 0
         println(i, ": ", loss.data[1, 1])
-        # println(batch_y, o.data)
     end
 
     sgd_optimizer(loss, step_size=learning_rate)
 end
+
+evaluate()
