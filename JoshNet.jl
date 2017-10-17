@@ -1,9 +1,10 @@
 module JoshNet
 
 export Tensor, None
-export +, *, -, abs, relu, reduce_mean, reduce_sum, softmax
+export +, *, -, ^, abs, exp, relu, reduce_mean, reduce_sum, softmax
 export emptytensor, gaussian_tensor, variance_scaled_tensor
-export sgd_optimizer, fc_layer
+export SGDOptimizer, SGDWithMomentum, optimize!
+export fc_layer
 
 import Base.*
 import Base.+
@@ -83,11 +84,13 @@ function forward(op::ReduceMeanOp)
     return op.child
 end
 function backward(op::ReduceMeanOp)
+    grad = zeros(Matrix{Float32}(size(op.parent.grad)...))
     divisor = 1.0
     for dim in op.dims
         divisor *= size(op.parent.data)[dim]
     end
-    op.parent.grad .+= (op.child.grad ./ divisor)
+    grad .+= (op.child.grad ./ divisor)
+    return grad
 end
 function reduce_mean(t1::Tensor; axis::Vector{<:Integer}=Integer[1, 2])
     r = ReduceMeanOp(t1, Tensor(), axis)
@@ -112,7 +115,9 @@ function forward(op::ReduceSumOp)
     return op.child
 end
 function backward(op::ReduceSumOp)
-    op.parent.grad .+= op.child.grad
+    grad = zeros(Matrix{Float32}(size(op.parent.grad)...))
+    grad .+= op.child.grad
+    return grad
 end
 function reduce_sum(t1::Tensor; axis::Vector{<:Integer}=Integer[1, 2])
     r = ReduceSumOp(t1, Tensor(), axis)
@@ -134,8 +139,11 @@ function forward(op::MatmulOp)
     return op.child
 end
 function backward(op::MatmulOp)
-    op.parent1.grad += op.child.grad * transpose(op.parent2.data)
-    op.parent2.grad += transpose(op.parent1.data) * op.child.grad
+    grad1 = zeros(Matrix{Float32}(size(op.parent1.grad)...))
+    grad2 = zeros(Matrix{Float32}(size(op.parent2.grad)...))
+    grad1 += op.child.grad * transpose(op.parent2.data)
+    grad2 += transpose(op.parent1.data) * op.child.grad
+    return grad1, grad2
 end
 function *(t1::Tensor, t2::Tensor)
     op = MatmulOp(t1, t2, Tensor())
@@ -164,16 +172,19 @@ function forward(op::AddOp)
     return op.child
 end
 function backward(op::AddOp)
-    if size(op.parent1.grad)[1] > size(op.parent2.grad)[1]
-        op.parent1.grad += op.child.grad
-        op.parent2.grad .+= sum(op.child.grad, 1)
-    elseif size(op.parent1.grad)[1] < size(op.parent2.grad)[1]
-        op.parent1.grad .+= sum(op.child.grad, 1)
-        op.parent2.grad += op.child.grad
+    grad1 = zeros(Matrix{Float32}(size(op.parent1.grad)...))
+    grad2 = zeros(Matrix{Float32}(size(op.parent2.grad)...))
+    if size(grad1)[1] > size(grad2)[1]
+        grad1 += op.child.grad
+        grad2 .+= sum(op.child.grad, 1)
+    elseif size(grad1)[1] < size(grad2)[1]
+        grad1 .+= sum(op.child.grad, 1)
+        grad2 += op.child.grad
     else
-        op.parent1.grad += op.child.grad
-        op.parent2.grad += op.child.grad
+        grad1 += op.child.grad
+        grad2 += op.child.grad
     end
+    return grad1, grad2
 end
 function +(t1::Tensor, t2::Tensor)
     op = AddOp(t1, t2, Tensor())
@@ -202,16 +213,19 @@ function forward(op::SubtractOp)
     return op.child
 end
 function backward(op::SubtractOp)
-    if size(op.parent1.grad)[2] > size(op.parent2.grad)[2]
-        op.parent1.grad += op.child.grad
-        op.parent2.grad .-= sum(op.child.grad, 2)
-    elseif size(op.parent1.grad)[2] < size(op.parent2.grad)[2]
-        op.parent1.grad .+= sum(op.child.grad, 2)
-        op.parent2.grad -= op.child.grad
+    grad1 = zeros(Matrix{Float32}(size(op.parent1.grad)...))
+    grad2 = zeros(Matrix{Float32}(size(op.parent2.grad)...))
+    if size(grad1)[2] > size(grad2)[2]
+        grad1 += op.child.grad
+        grad2 .-= sum(op.child.grad, 2)
+    elseif size(grad1)[2] < size(grad2)[2]
+        grad1 .+= sum(op.child.grad, 2)
+        grad2 -= op.child.grad
     else
-        op.parent1.grad += op.child.grad
-        op.parent2.grad -= op.child.grad
+        grad1 += op.child.grad
+        grad2 -= op.child.grad
     end
+    return grad1, grad2
 end
 function -(t1::Tensor, t2::Tensor)
     op = SubtractOp(t1, t2, Tensor())
@@ -241,7 +255,7 @@ end
 function backward(op::AbsOp)
     same = convert(Array{Float32}, op.child.data .== op.parent.data)
     diff = 1 .- same
-    op.parent.grad += (op.child.grad .* same) - (op.child.grad .* diff)
+    return (op.child.grad .* same) - (op.child.grad .* diff)
 end
 function abs(t::Tensor)
     op = AbsOp(t, Tensor())
@@ -262,7 +276,7 @@ function forward(op::PowerOp)
     return op.child
 end
 function backward(op::PowerOp)
-    op.parent.grad += (op.exponent .* op.parent.data .^ (op.exponent - 1)) .* op.child.grad
+    return (op.exponent .* op.parent.data .^ (op.exponent - 1)) .* op.child.grad
 end
 function ^(t::Tensor, pow::Real)
     op = PowerOp(t, Tensor(), pow)
@@ -282,7 +296,7 @@ function forward(op::ExpOp)
     return op.child
 end
 function backward(op::ExpOp)
-    op.parent.grad = op.child.grad .* exp.(op.parent.data)
+    return op.child.grad .* exp.(op.parent.data)
 end
 function exp(t::Tensor)
     op = ExpOp(t, Tensor())
@@ -302,7 +316,7 @@ function forward(op::ReluOp)
     return op.child
 end
 function backward(op::ReluOp)
-    op.parent.grad = op.child.grad .* (op.parent.data .> 0)
+    return op.child.grad .* (op.parent.data .> 0)
 end
 function relu(t::Tensor)
     op = ReluOp(t, Tensor())
@@ -327,6 +341,7 @@ function forward(op::SoftmaxOp)
     return op.child
 end
 function backward(op::SoftmaxOp)
+    grad = zeros(Matrix{Float32}(size(op.parent.grad)...))
     dims = size(op.child.data)
     jacobian = Matrix{Float32}(dims[2], dims[2])
     for i in 1:dims[1]
@@ -337,12 +352,9 @@ function backward(op::SoftmaxOp)
         jacobian[:, :] .*= op.child.grad[i, :]
 
         # # Apply the jacobian
-        op.parent.grad[i:i, :] .+= sum(jacobian[:, :], 1)
+        grad[i:i, :] .+= sum(jacobian[:, :], 1)
     end
-    return jacobian
-    # same = op.child.data .* (1 .- op.child.data)
-    # diff = sum(.-(op.child.data ), 2)
-    # op.parent.grad = op.child.grad .- (op.child.grad .* sum(op.child.grad, 2))
+    return grad
 end
 function softmax(t::Tensor)
     op = SoftmaxOp(t, Tensor())
@@ -366,23 +378,80 @@ end
 function apply_and_zero_gradients(n::None)
 end
 
-function sgd_optimizer(t::Tensor; step_size::Real=0.01)
-    function sgd_optim_inner(t::Tensor)
-        sgd_optim_inner(t.parent)
+abstract type Optimizer end
+
+# ==== SGD ==== #
+
+struct SGDOptimizer <: Optimizer
+end
+function optimize!(optim::SGDOptimizer, t::Tensor; step_size::Real=0.01)
+    function optim_inner(t::Tensor)
+        optim_inner(t.parent)
     end
-    function sgd_optim_inner(op::BinaryOp)
-        backward(op)
-        sgd_optim_inner(op.parent1)
-        sgd_optim_inner(op.parent2)
+    function optim_inner(op::BinaryOp)
+        grad1, grad2 = backward(op)
+        op.parent1.grad += grad1
+        op.parent2.grad += grad2
+        optim_inner(op.parent1)
+        optim_inner(op.parent2)
     end
-    function sgd_optim_inner(op::UnaryOp)
-        backward(op)
-        sgd_optim_inner(op.parent)
+    function optim_inner(op::UnaryOp)
+        grad = backward(op)
+        op.parent.grad += grad
+        optim_inner(op.parent)
     end
-    function sgd_optim_inner(n::None)
+    function optim_inner(n::None)
     end
     fill!(t.grad, step_size)
-    sgd_optim_inner(t.parent)
+    optim_inner(t.parent)
+    apply_and_zero_gradients(t.parent)
+end
+
+# ==== SGD With Momentum ==== #
+
+mutable struct SGDWithMomentum <: Optimizer
+    momentums::Dict{Tensor, Matrix{Float32}}
+    gamma::AbstractFloat
+end
+SGDWithMomentum() = SGDWithMomentum(Dict{Tensor, Matrix{Float32}}(), 0.5)
+function SGDWithMomentum(momentum::AbstractFloat)
+    return SGDWithMomentum(Dict{Tensor, Matrix{Float32}}(), momentum)
+end
+function optimize!(optim::SGDWithMomentum, t::Tensor; step_size::Real=0.01)
+    function optim_inner(t::Tensor)
+        optim_inner(t.parent)
+    end
+    function optim_inner(op::BinaryOp)
+        if !(op.parent1 in keys(optim.momentums))
+            println("Creating momentum matrix")
+            optim.momentums[op.parent1] = Matrix{Float32}(size(op.parent1.grad)...)
+        end
+        if !(op.parent2 in keys(optim.momentums))
+            optim.momentums[op.parent2] = Matrix{Float32}(size(op.parent2.grad)...)
+        end
+
+        grad1, grad2 = backward(op)
+        optim.momentums[op.parent1] = optim.gamma .* optim.momentums[op.parent1] + grad1
+        optim.momentums[op.parent2] = optim.gamma .* optim.momentums[op.parent2] + grad2
+        op.parent1.grad += optim.momentums[op.parent1]
+        op.parent2.grad += optim.momentums[op.parent2]
+        optim_inner(op.parent1)
+        optim_inner(op.parent2)
+    end
+    function optim_inner(op::UnaryOp)
+        if !(op.parent in keys(optim.momentums))
+            optim.momentums[op.parent] = Matrix{Float32}(size(op.parent.grad)...)
+        end
+
+        grad = backward(op)
+        optim.momentums[op.parent] = optim.gamma .* optim.momentums[op.parent] + grad
+        op.parent.grad += optim.momentums[op.parent]
+        optim_inner(op.parent)
+    end
+    function optim_inner(n::None)
+    end
+    fill!(t.grad, step_size)
+    optim_inner(t.parent)
     apply_and_zero_gradients(t.parent)
 end
 

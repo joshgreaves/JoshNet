@@ -22,15 +22,18 @@ for i in 1:num_data
     labels[i, :] = mappings[arff.data[i, end]]
 end
 
-# Define the layers
+# ============================== NETWORK DEF ================================ #
+
+# Hyperparameters
+learning_rate = 0.1
+num_epochs = 1000
+batch_size = 10
+
+# Layers
 fc1, Wb1 = fc_layer(4, 100)
 fc2, Wb2 = fc_layer(100, 100)
 fc3, Wb3 = fc_layer(100, num_classes, activation_fn=softmax)
-
-# Define hyperparameters
-learning_rate = 0.1
-num_epochs = 1000
-batch_size = 32
+optim = SGDWithMomentum()
 
 # The network definition
 function classify(input::Matrix{Float32})
@@ -39,6 +42,7 @@ function classify(input::Matrix{Float32})
     return fc3(h2)
 end
 
+# =============================== TRAINING ================================== #
 # Calculate overall accuracy
 function evaluate()
     predictions = classify(data)
@@ -51,11 +55,9 @@ function evaluate()
 end
 evaluate()
 
-# Train
 for i in 1:1000
     # Get a batch
     batch_x, batch_y = DataPrep.getbatch(data, labels, batch_size=batch_size)
-
     o = classify(batch_x)
     loss = reduce_mean(reduce_sum((o - batch_y)^2.0, axis=[2]))
 
@@ -63,7 +65,8 @@ for i in 1:1000
         println(i, ": ", loss.data[1, 1])
     end
 
-    sgd_optimizer(loss, step_size=learning_rate)
+    optimize!(optim, loss, step_size=learning_rate)
 end
+
 
 evaluate()
