@@ -27,12 +27,12 @@ end
 # Hyperparameters
 learning_rate = 0.1
 num_epochs = 1000
-batch_size = 10
+batch_size = 32
 
 # Layers
-fc1, Wb1 = fc_layer(4, 100)
-fc2, Wb2 = fc_layer(100, 100)
-fc3, Wb3 = fc_layer(100, num_classes, activation_fn=softmax)
+fc1, Wb1 = fc_layer("Layer1", 4, 100)
+fc2, Wb2 = fc_layer("Layer2", 100, 100)
+fc3, Wb3 = fc_layer("Layer3", 100, num_classes, activation_fn=softmax)
 optim = SGDWithMomentum()
 
 # The network definition
@@ -55,7 +55,7 @@ function evaluate()
 end
 evaluate()
 
-for i in 1:1000
+for i in 1:num_epochs
     # Get a batch
     batch_x, batch_y = DataPrep.getbatch(data, labels, batch_size=batch_size)
     o = classify(batch_x)

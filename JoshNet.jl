@@ -30,17 +30,20 @@ mutable struct Tensor <: JNNode
     grad::Matrix{Float32}
     parent::JNNode
     train::Bool
+    name::AbstractString
 end
-Tensor() = Tensor(Matrix{Float32}(0, 0), Matrix{Float32}(0, 0), None(), false)
-function Tensor(m::Matrix{Float32}; trainable::Bool=true)
+Tensor() = Tensor(Matrix{Float32}(0, 0), Matrix{Float32}(0, 0), None(), false, "")
+function Tensor(m::Matrix{Float32}; trainable::Bool=true, name::AbstractString="")
     shape = (size(m)[1], size(m)[2])
-    return Tensor(m, zeros(Matrix{Float32}(shape)), None(), trainable)
+    return Tensor(m, zeros(Matrix{Float32}(shape)), None(), trainable, name)
 end
-function emptytensor(cols::Integer, rows::Integer; trainable::Bool=true)
+function emptytensor(cols::Integer, rows::Integer; trainable::Bool=true,
+                     name::AbstractString="")
     return Tensor(zeros{Float32}(cols, rows),
                   zeros{Float32}(cols, rows),
                   None(),
-                  trainable)
+                  trainable,
+                  name)
 end
 function apply_gradients!(t::Tensor)
     if t.train
@@ -54,14 +57,16 @@ end
 # ------------------------- INIT ---------------------------------------------
 
 function gaussian_tensor(height::Integer, width::Integer; mean::Number=0,
-                         variance::Number=0.1, trainable::Bool=true)
+                         variance::Number=0.1, trainable::Bool=true,
+                         name::AbstractString="")
     return Tensor((mean + randn(Float32, height, width)) / variance,
-                  trainable=trainable)
+                  trainable=trainable, name=name)
 end
 
-function variance_scaled_tensor(height::Integer, width::Integer; trainable::Bool=true)
-    return Tensor(randn(Float32, height, width) / (10 * height),
-                  trainable=trainable)
+function variance_scaled_tensor(height::Integer, width::Integer;
+                                trainable::Bool=true, name::AbstractString="")
+    return Tensor(randn(Float32, height, width) / height,
+                  trainable=trainable, name=name)
 end
 
 # ------------------------- OPS ----------------------------------------------
@@ -84,7 +89,7 @@ function forward(op::ReduceMeanOp)
     return op.child
 end
 function backward(op::ReduceMeanOp)
-    grad = zeros(Matrix{Float32}(size(op.parent.grad)...))
+    grad = zeros(op.parent.grad)
     divisor = 1.0
     for dim in op.dims
         divisor *= size(op.parent.data)[dim]
@@ -115,7 +120,7 @@ function forward(op::ReduceSumOp)
     return op.child
 end
 function backward(op::ReduceSumOp)
-    grad = zeros(Matrix{Float32}(size(op.parent.grad)...))
+    grad = zeros(op.parent.grad)
     grad .+= op.child.grad
     return grad
 end
@@ -139,8 +144,8 @@ function forward(op::MatmulOp)
     return op.child
 end
 function backward(op::MatmulOp)
-    grad1 = zeros(Matrix{Float32}(size(op.parent1.grad)...))
-    grad2 = zeros(Matrix{Float32}(size(op.parent2.grad)...))
+    grad1 = zeros(op.parent1.grad)
+    grad2 = zeros(op.parent2.grad)
     grad1 += op.child.grad * transpose(op.parent2.data)
     grad2 += transpose(op.parent1.data) * op.child.grad
     return grad1, grad2
@@ -172,8 +177,8 @@ function forward(op::AddOp)
     return op.child
 end
 function backward(op::AddOp)
-    grad1 = zeros(Matrix{Float32}(size(op.parent1.grad)...))
-    grad2 = zeros(Matrix{Float32}(size(op.parent2.grad)...))
+    grad1 = zeros(op.parent1.grad)
+    grad2 = zeros(op.parent2.grad)
     if size(grad1)[1] > size(grad2)[1]
         grad1 += op.child.grad
         grad2 .+= sum(op.child.grad, 1)
@@ -213,8 +218,8 @@ function forward(op::SubtractOp)
     return op.child
 end
 function backward(op::SubtractOp)
-    grad1 = zeros(Matrix{Float32}(size(op.parent1.grad)...))
-    grad2 = zeros(Matrix{Float32}(size(op.parent2.grad)...))
+    grad1 = zeros(op.parent1.grad)
+    grad2 = zeros(op.parent2.grad)
     if size(grad1)[2] > size(grad2)[2]
         grad1 += op.child.grad
         grad2 .-= sum(op.child.grad, 2)
@@ -325,9 +330,6 @@ end
 
 # ==== SOFTMAX ==== #
 
-# function sotfmax(t::Tensor)
-#     exps = exp()
-# end
 struct SoftmaxOp <: UnaryOp
     parent::Tensor
     child::Tensor
@@ -341,7 +343,7 @@ function forward(op::SoftmaxOp)
     return op.child
 end
 function backward(op::SoftmaxOp)
-    grad = zeros(Matrix{Float32}(size(op.parent.grad)...))
+    grad = zeros(op.parent.grad)
     dims = size(op.child.data)
     jacobian = Matrix{Float32}(dims[2], dims[2])
     for i in 1:dims[1]
@@ -410,42 +412,47 @@ end
 # ==== SGD With Momentum ==== #
 
 mutable struct SGDWithMomentum <: Optimizer
-    momentums::Dict{Tensor, Matrix{Float32}}
+    momentums::Dict{AbstractString, Matrix{Float32}}
     gamma::AbstractFloat
 end
-SGDWithMomentum() = SGDWithMomentum(Dict{Tensor, Matrix{Float32}}(), 0.5)
+SGDWithMomentum() = SGDWithMomentum(Dict{AbstractString, Matrix{Float32}}(), 0.5)
 function SGDWithMomentum(momentum::AbstractFloat)
     return SGDWithMomentum(Dict{Tensor, Matrix{Float32}}(), momentum)
 end
 function optimize!(optim::SGDWithMomentum, t::Tensor; step_size::Real=0.01)
     function optim_inner(t::Tensor)
+        # Backprop the error
         optim_inner(t.parent)
+
+        # If it is trainable, replace the gradients with momentums
+        if t.train
+            if !(t.name in keys(optim.momentums))
+                optim.momentums[t.name] = zeros(t.grad)
+            end
+            optim.momentums[t.name] = (optim.gamma .* optim.momentums[t.name]) + t.grad
+            t.grad = copy(optim.momentums[t.name])
+        end
     end
     function optim_inner(op::BinaryOp)
-        if !(op.parent1 in keys(optim.momentums))
-            println("Creating momentum matrix")
-            optim.momentums[op.parent1] = Matrix{Float32}(size(op.parent1.grad)...)
-        end
-        if !(op.parent2 in keys(optim.momentums))
-            optim.momentums[op.parent2] = Matrix{Float32}(size(op.parent2.grad)...)
-        end
-
+        # Calculate the gradient
         grad1, grad2 = backward(op)
-        optim.momentums[op.parent1] = optim.gamma .* optim.momentums[op.parent1] + grad1
-        optim.momentums[op.parent2] = optim.gamma .* optim.momentums[op.parent2] + grad2
-        op.parent1.grad += optim.momentums[op.parent1]
-        op.parent2.grad += optim.momentums[op.parent2]
+
+        # Apply the normal gradients
+        op.parent1.grad += grad1
+        op.parent2.grad += grad2
+
+        # Continue backprop
         optim_inner(op.parent1)
         optim_inner(op.parent2)
     end
     function optim_inner(op::UnaryOp)
-        if !(op.parent in keys(optim.momentums))
-            optim.momentums[op.parent] = Matrix{Float32}(size(op.parent.grad)...)
-        end
-
+        # Calculate the gradient
         grad = backward(op)
-        optim.momentums[op.parent] = optim.gamma .* optim.momentums[op.parent] + grad
-        op.parent.grad += optim.momentums[op.parent]
+
+        # Apply the normal gradients
+        op.parent.grad += grad
+
+        # Continue backprop
         optim_inner(op.parent)
     end
     function optim_inner(n::None)
@@ -457,11 +464,12 @@ end
 
 # -----------------------------HELPERS--------------------------------------- #
 
-function fc_layer(num_inputs::Integer, num_outputs::Integer;
+function fc_layer(scope::AbstractString, num_inputs::Integer,
+                  num_outputs::Integer;
                   init_fn::Function=variance_scaled_tensor,
                   activation_fn::Function=relu)
-    W = init_fn(num_inputs, num_outputs)
-    b = init_fn(1, num_outputs)
+    W = init_fn(num_inputs, num_outputs, name=scope*"/Weights")
+    b = init_fn(1, num_outputs, name=scope*"/bias")
     f(t::Union{Tensor, Matrix{Float32}}) = activation_fn((t * W) + b)
     return f, (W, b)
 end
