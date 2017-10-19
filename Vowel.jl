@@ -8,20 +8,35 @@ importall JoshNet
 import DataPrep
 import Arff
 
-# Load the Iris dataset and get it into the correct form
-arff = Arff.loadarff("data/iris.arff")
-data = convert(Matrix{Float32}, arff.data[:, 1:end-1])
+# Load the vowel dataset and get it into the correct form
+arff = Arff.loadarff("data/vowel.arff")
 
-num_data = size(data)[1]
-num_features = size(data)[2]
-num_classes = 3
+# To help creating the dictionaries
+function onehot(i::Integer, n::Integer)
+    result = zeros(Float32, n)
+    result[i] = 1.0
+    return result
+end
 
-mappings = Dict(:(Iris - setosa) =>  Float32[1.0, 0.0, 0.0],
-                :(Iris - versicolor) => Float32[0.0, 1.0, 0.0],
-                :(Iris - virginica) => Float32[0.0, 0.0, 1.0])
+# Dicts for converting data into correct form
+names = [:Andrew, :Bill, :David, :Mark, :Jo, :Kate, :Penny, :Rose, :Mike,
+         :Nick, :Rich, :Tim, :Sarah, :Sue, :Wendy]
+num_names = length(names)
+name_to_id = Dict(names[i] => onehot(i, num_names) for i in 1:num_names)
+gender_dict = Dict(:Male => Float32[1, 0], :Female => [0, 1])
+class_names = [:hid, :hId, :hEd, :hAd, :hYd, :had, :hOd, :hod, :hUd, :hud, :hed]
+num_classes = length(class_names)
+label_dict = Dict(class_names[i] => onehot(i, num_classes) for i in 1:num_classes)
+
+num_data = size(arff.data)[1]
+num_features = num_names + 2 + 10 # 2 = male or female, 10 = feature0 -> feature10
+data = Matrix{Float32}(num_data, num_features)
 labels = Matrix{Float32}(num_data, num_classes)
 for i in 1:num_data
-    labels[i, :] = mappings[arff.data[i, end]]
+    data[i, 1:num_names] = name_to_id[arff.data[i, 2]]
+    data[i, num_names+1:num_names+2] = gender_dict[arff.data[i, 3]]
+    data[i, num_names+3:num_names+12] = arff.data[i,4:end-1]
+    labels[i, :] = label_dict[arff.data[i, end]]
 end
 
 # Split the dataset into train, validate, and test
@@ -72,7 +87,7 @@ train_mse = Matrix{Float32}(num_epochs, 1)
 val_mse = Matrix{Float32}(num_epochs, 1)
 val_acc = Matrix{Float32}(num_epochs, 1)
 steps_since_update = 0
-most_steps = 10
+most_steps = 20
 best_mse = 1000
 cached_wb1 = deepcopy(Wb1)
 cached_wb2 = deepcopy(Wb2)
@@ -94,6 +109,10 @@ for i in 1:num_epochs
 
         optimize!(optim, loss, step_size=learning_rate)
     end
+    # batch_x, batch_y = DataPrep.getbatch(train_x, train_y, batch_size=batch_size)
+    # o = classify(batch_x)
+    # loss = reduce_mean(reduce_sum((o - batch_y)^2.0, axis=[2]))
+    # optimize!(optim, loss, step_size=learning_rate)
 
     train_mse[i, 1] = evaluate_mse(train_x, train_y)
     val_mse[i, 1] = evaluate_mse(val_x, val_y)
@@ -127,7 +146,7 @@ function plot_eval()
     plot!(val_mse[1:num_steps, 1], label="validation mse")
     plot!(val_acc[1:num_steps, 1], label="validation accuracy")
     vline!([stopping_index], label="best solution")
-    title!("Training on the Iris Dataset")
+    title!("Training on the vowels Dataset")
     xaxis!("Epochs")
     yaxis!("Accuracy / MSE")
 end

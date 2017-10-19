@@ -7,6 +7,15 @@ function splitdata(data::Array{<:Any, 2}, split::AbstractFloat=0.75)
     return (data[indices[1:split_index],:], data[indices[(split_index+1):end],:])
 end
 
+function splitdata(data::Array{<:Any, 2}, labels::Array{<:Any, 2},
+                   split::AbstractFloat=0.75)
+    data_points = size(data)[1]
+    indices = shuffle(1:data_points)
+    split_index = Int32(floor(data_points * split))
+    return data[indices[1:split_index],:], labels[indices[1:split_index],:],
+        data[indices[(split_index+1):end],:], labels[indices[(split_index+1):end],:]
+end
+
 function shuffledata(data::Array{<:Any, 2})
     num = size(data)[1]
     indices = shuffle(1:num)
@@ -19,7 +28,7 @@ function shuffledata(data::Array{<:Any, 2}, labels::Array{<:Any, 1})
     return data[indices,:], labels[indices]
 end
 
-function shuffledatas(data::Array{<:Any, 2}, labels::Array{<:Any, 2})
+function shuffledata(data::Array{<:Any, 2}, labels::Array{<:Any, 2})
     num = size(data)[1]
     indices = shuffle(1:num)
     return data[indices,:], labels[indices,:]
