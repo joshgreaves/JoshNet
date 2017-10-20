@@ -49,11 +49,11 @@ test_size = size(test_x)[1]
 # ============================== NETWORK DEF ================================ #
 
 # Hyperparameters
-learning_rate = 1.0
+learning_rate = 0.001
 num_epochs = 1000
 batch_size = 1
 
-runs = 50
+runs = 10
 train_mse = Matrix{Float32}(runs, 1)
 val_mse = Matrix{Float32}(runs, 1)
 val_acc = Matrix{Float32}(runs, 1)
@@ -115,10 +115,6 @@ for k in 1:runs
 
             optimize!(optim, loss, step_size=learning_rate)
         end
-        # batch_x, batch_y = DataPrep.getbatch(train_x, train_y, batch_size=batch_size)
-        # o = classify(batch_x)
-        # loss = reduce_mean(reduce_sum((o - batch_y)^2.0, axis=[2]))
-        # optimize!(optim, loss, step_size=learning_rate)
 
         this_mse = evaluate_mse(val_x, val_y)
         num_steps += 1
